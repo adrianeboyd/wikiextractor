@@ -60,7 +60,7 @@ import os.path
 import re  # TODO use regex when it will be standard
 import sys
 from io import StringIO
-from multiprocessing import Queue, get_context, cpu_count
+from multiprocessing import Queue, cpu_count, Process
 from timeit import default_timer
 
 from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
@@ -160,12 +160,18 @@ class OutputSplitter():
         self.nextFile = nextFile
         self.compress = compress
         self.max_file_size = max_file_size
-        self.file = self.open(self.nextFile.next())
+        self._file = None
+
+    @property
+    def file(self):
+        if self._file is None:
+            self._file = self.open(self.nextFile.next())
+        return self._file
 
     def reserve(self, size):
         if self.file.tell() > 0 and self.file.tell() + size > self.max_file_size:
             self.close()
-            self.file = self.open(self.nextFile.next())
+            self._file = self.open(self.nextFile.next())
 
     def write(self, data):
         self.reserve(len(data))
@@ -174,17 +180,15 @@ class OutputSplitter():
         else:
             self.file.write(data)
 
-    def flush(self):
-        self.file.flush()
-
     def close(self):
-        self.file.close()
+        if self._file is not None:
+            self.file.close()
 
     def open(self, filename):
         if self.compress:
             return bz2.BZ2File(filename + '.bz2', 'w')
         else:
-            return open(filename, 'w')
+            return open(filename, 'w', encoding='utf-8')
 
 
 # ----------------------------------------------------------------------
@@ -340,7 +344,7 @@ def collect_pages(text):
 
 
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
-                 process_count, html_safe):
+                 process_count, html_safe, to_json, keep_links, html_formatting):
     """
     :param input_file: name of the wikipedia dump file; '-' to read from stdin
     :param template_file: optional file with template definitions.
@@ -415,9 +419,6 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # - pages to be processed are dispatched to workers
     # - a reduce process collects the results, sort them and print them.
 
-    # fixes MacOS error: TypeError: cannot pickle '_io.TextIOWrapper' object
-    Process = get_context("fork").Process
-
     maxsize = 10 * process_count
     # output queue
     output_queue = Queue(maxsize=maxsize)
@@ -434,7 +435,8 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     workers = []
     for _ in range(max(1, process_count)):
         extractor = Process(target=extract_process,
-                            args=(jobs_queue, output_queue, html_safe))
+                            args=(jobs_queue, output_queue, html_safe, to_json,
+                                  keep_links, html_formatting))
         extractor.daemon = True  # only live while parent process lives
         extractor.start()
         workers.append(extractor)
@@ -464,8 +466,6 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
     # wait for it to finish
     reduce.join()
 
-    if output != sys.stdout:
-        output.close()
     extract_duration = default_timer() - extract_start
     extract_rate = ordinal / extract_duration
     logging.info("Finished %d-process extraction of %d articles in %.1fs (%.1f art/s)",
@@ -476,7 +476,7 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 # Multiprocess support
 
 
-def extract_process(jobs_queue, output_queue, html_safe):
+def extract_process(jobs_queue, output_queue, html_safe, to_json, keep_links, html_formatting):
     """Pull tuples of raw page content, do CPU/regex-heavy fixup, push finished text
     :param jobs_queue: where to get jobs.
     :param output_queue: where to queue extracted text for output.
@@ -486,7 +486,7 @@ def extract_process(jobs_queue, output_queue, html_safe):
         job = jobs_queue.get()  # job is (id, revid, urlbase, title, page, ordinal)
         if job:
             out = StringIO()  # memory buffer
-            Extractor(*job[:-1]).extract(out, html_safe)  # (id, urlbase, title, page)
+            Extractor(*job[:-1]).extract(out, html_safe, to_json, keep_links, html_formatting)  # (id, urlbase, title, page)
             text = out.getvalue()
             output_queue.put((job[-1], text))  # (ordinal, extracted_text)
             out.close()
@@ -522,7 +522,7 @@ def reduce_process(output_queue, output):
                 break
             ordinal, text = pair
             ordering_buffer[ordinal] = text
-    output.flush()
+    output.close()
 
 
 # ----------------------------------------------------------------------
@@ -585,7 +585,7 @@ def main():
     Extractor.HtmlFormatting = args.html
     if args.html:
         Extractor.keepLinks = True
-    Extractor.to_json = args.json
+    Extractor.toJson = args.json
 
     expand_templates = args.no_templates
 
@@ -655,7 +655,8 @@ def main():
             return
 
     process_dump(input_file, args.templates, output_path, file_size,
-                 args.compress, args.processes, args.html_safe)
+                 args.compress, args.processes, args.html_safe, args.json,
+                 args.links, args.html)
 
 
 if __name__ == '__main__':
