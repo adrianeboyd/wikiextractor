@@ -68,7 +68,7 @@ from .extract import Extractor, ignoreTag, define_template, acceptedNamespaces
 # ===========================================================================
 
 # Program version
-__version__ = '3.0.6'
+__version__ = '3.0.7a0'
 
 ##
 # Defined in <siteinfo>
@@ -163,7 +163,7 @@ class OutputSplitter():
         self.file = self.open(self.nextFile.next())
 
     def reserve(self, size):
-        if self.file.tell() + size > self.max_file_size:
+        if self.file.tell() > 0 and self.file.tell() + size > self.max_file_size:
             self.close()
             self.file = self.open(self.nextFile.next())
 
@@ -173,6 +173,9 @@ class OutputSplitter():
             self.file.write(data)
         else:
             self.file.write(data)
+
+    def flush(self):
+        self.file.flush()
 
     def close(self):
         self.file.close()
@@ -279,6 +282,63 @@ def decode_open(filename, mode='rt', encoding='utf-8'):
         return open(filename, mode, encoding=encoding)
 
 
+def collect_pages(text):
+    """
+    :param text: the text of a wikipedia file dump.
+    """
+    # we collect individual lines, since str.join() is significantly faster
+    # than concatenation
+    page = []
+    id = ''
+    revid = ''
+    last_id = ''
+    inText = False
+    redirect = False
+    for line in text:
+        if '<' not in line:     # faster than doing re.search()
+            if inText:
+                page.append(line)
+            continue
+        m = tagRE.search(line)
+        if not m:
+            continue
+        tag = m.group(2)
+        if tag == 'page':
+            page = []
+            redirect = False
+        elif tag == 'id' and not id:
+            id = m.group(3)
+        elif tag == 'id' and id: # <revision> <id></id> </revision>
+            revid = m.group(3)
+        elif tag == 'title':
+            title = m.group(3)
+        elif tag == 'redirect':
+            redirect = True
+        elif tag == 'text':
+            inText = True
+            line = line[m.start(3):m.end(3)]
+            page.append(line)
+            if m.lastindex == 4:  # open-close
+                inText = False
+        elif tag == '/text':
+            if m.group(1):
+                page.append(m.group(1))
+            inText = False
+        elif inText:
+            page.append(line)
+        elif tag == '/page':
+            colon = title.find(':')
+            if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
+                    not redirect and not title.startswith(templateNamespace)):
+                yield (id, revid, title, page)
+                last_id = id
+            id = ''
+            revid = ''
+            page = []
+            inText = False
+            redirect = False
+
+
 def process_dump(input_file, template_file, out_file, file_size, file_compress,
                  process_count, html_safe):
     """
@@ -383,56 +443,12 @@ def process_dump(input_file, template_file, out_file, file_size, file_compress,
 
     # we collect individual lines, since str.join() is significantly faster
     # than concatenation
-    page = []
-    id = ''
-    revid = ''
-    last_id = ''
+
     ordinal = 0  # page count
-    inText = False
-    redirect = False
-    for line in input:
-        if '<' not in line:  # faster than doing re.search()
-            if inText:
-                page.append(line)
-            continue
-        m = tagRE.search(line)
-        if not m:
-            continue
-        tag = m.group(2)
-        if tag == 'page':
-            page = []
-            redirect = False
-        elif tag == 'id' and not id:
-            id = m.group(3)
-        elif tag == 'id' and id: # <revision> <id></id> </revision>
-            revid = m.group(3)
-        elif tag == 'title':
-            title = m.group(3)
-        elif tag == 'redirect':
-            redirect = True
-        elif tag == 'text':
-            inText = True
-            line = line[m.start(3):m.end(3)]
-            page.append(line)
-            if m.lastindex == 4:  # open-close
-                inText = False
-        elif tag == '/text':
-            if m.group(1):
-                page.append(m.group(1))
-            inText = False
-        elif inText:
-            page.append(line)
-        elif tag == '/page':
-            colon = title.find(':')
-            if (colon < 0 or (title[:colon] in acceptedNamespaces) and id != last_id and
-                    not redirect and not title.startswith(templateNamespace)):
-                job = (id, revid, urlbase, title, page, ordinal)
-                jobs_queue.put(job)  # goes to any available extract_process
-                last_id = id
-                ordinal += 1
-            id = ''
-            revid = ''
-            page = []
+    for id, revid, title, page in collect_pages(input):
+        job = (id, revid, urlbase, title, page, ordinal)
+        jobs_queue.put(job)  # goes to any available extract_process
+        ordinal += 1
 
     input.close()
 
@@ -506,6 +522,7 @@ def reduce_process(output_queue, output):
                 break
             ordinal, text = pair
             ordering_buffer[ordinal] = text
+    output.flush()
 
 
 # ----------------------------------------------------------------------
