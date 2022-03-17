@@ -847,16 +847,21 @@ class Extractor():
         text = compact(text, mark_headers=mark_headers)
         return text
 
-    def extract(self, out, html_safe=True):
+    def extract(self, out, html_safe=True, to_json=False, keep_links=False,
+            html_formatting=False):
         """
         :param out: a memory file.
         :param html_safe: whether to escape HTML entities.
         """
+        # set class variables for spawn
+        self.toJson = to_json
+        self.keepLinks = keep_links
+        self.HtmlFormatting = html_formatting
         logging.debug("%s\t%s", self.id, self.title)
         text = ''.join(self.page)
         text = self.clean_text(text, html_safe=html_safe)
 
-        if self.to_json:
+        if self.toJson:
             json_data = {
 		'id': self.id,
                 'revid': self.revid,
